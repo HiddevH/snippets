@@ -1,0 +1,35 @@
+def main(){
+  println(s"Create database '${database}' on location '$blobPath'")
+  spark.sql(s"CREATE DATABASE IF NOT EXISTS ${database}_views ")
+  spark.sql(s"USE $database")
+  for (info <- dbutils.fs.ls(blobPath)) {
+    try{
+      val table = info.name.dropRight(1)
+      println(s"Table: ${table}")
+      val location = info.path
+      val dbTable = $"${database}.${table}"
+      
+      println("  Create versioned tables and views...")
+      for(version <- spark.sql(s"SELECT DISTINCT version FROM $dbTable").collect.map(_.getInt(0))){
+        println(s"    Create table and view for version=${version}")
+        
+        spark.sql(s"CREATE TABLE IF NOT EXISTS ${dbTable}_${version} USING PARQUET LOCATION '${location}version=${version}/'")
+        
+        spark.sql(s"MSCK REPAIR TABLE ${dbTable}_${version}")
+        
+        spark.sql(s"""
+          CREATE VIEW IF NOT EXISTS ${database}_views.${table}_${version}_latest AS
+          SELECT * FROM 
+          (SELECT *,
+            row_number() OVER (PARTITION BY record_date ORDER BY batch_id DESC) = 1 as is_latest_record,
+            row_number() OVER (PARTITION BY record_date ORDER BY batch_id ASC) as record_version  FROM ${dbTable}_${version} ) tmp 
+          WHERE is_latest_record = true
+        """)  
+      }
+      println()
+    }catch{
+      case e: Exception => println("Exception caught: " + e)
+    }  
+  }
+  println(s"Done repairing all tables of '$database'")
+}
